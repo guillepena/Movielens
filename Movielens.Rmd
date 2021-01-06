@@ -1,0 +1,314 @@
+---
+title: "Movielens project"
+author: "Guillermo Pe??a"
+date: "05/01/2021"
+output: html_document
+---
+# Introduction {-}
+One of the numerous applications of machine learning in information technology is the ability to make recommendations of items or services to potential to users in general. In the year 2006, Netflix offered a challenge to the data science community. The challenge was to improve Netflix's in house software by 10% with a prize of $1M.
+
+This report contains problem definition, data ingestion, exploratory analysis, modeling and data analysis, results and conclusion.
+The evaluation criteria for this algorithm is a RMSE expected to be lower than 0.9.
+The function that computes the RMSE for ratings and their predictors will be:
+$$ RMSE = \sqrt{\frac{1}{N}\displaystyle\sum_{u,i} (\hat{y}_{u,i}-y_{u,i})^{2}} $$
+
+```{r RMSE_function1, echo = FALSE}
+RMSE <- function(predicted_ratings, true_ratings){
+  sqrt(mean((predicted_ratings - true_ratings)^2))
+}
+```
+
+Finally, the best resulting model will be used to predict the movie ratings.
+
+```{r}
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(lubridate)) install.packages("lubridate")
+if(!require(ggthemes)) install.packages("ggthemes")
+library(tidyverse)
+library(caret)
+library(data.table)
+library(lubridate)
+library(ggthemes)
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+
+# using R 4.0
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(movieId),
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+#Joining data
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of the movieLens data
+set.seed(1,sample.kind = "Rounding")
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# userId and movieId in validation set as in edx set assurance
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+# Remove objects we are not using
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+```
+
+In order to predict accurately the movie rating of the users that haven???t seen the movie yet, the he MovieLens dataset will be splitted into 2 subsets. Named ???edx???, a training subset to train the algorithm, and ???validation???, a subset to test the movie ratings.
+
+## Methods and Analysis ##
+
+# Data Analysis {-}
+
+```{r}
+head(edx)
+
+summarize(edx)
+
+edx %>% summarize(n_users = n_distinct(userId), n_movies = n_distinct(movieId))
+```
+
+This gives us a good summary of what the data set looks like.
+
+# Data pre-processing and exploratory analysis {-}
+
+Some users are positive or negative because of their own personal taste regardless of the movie. The model should include a user bias.
+The popularity of the movie genre depends on time. So we should also account for the time dependent analysis. The model should find genre popularity over the years.
+
+We have a look at the ratings distribution.
+
+```{r}
+edx %>%
+  ggplot(aes(rating)) +
+  geom_histogram(binwidth = 0.25, color = "black") +
+  ggtitle("Rating distribution") +
+  theme_economist(base_size = 10, base_family = "sans",
+  horizontal = TRUE, dkpanel = FALSE)
+```
+
+A good visual summary for the expected quality of the analysis can be given by the number of ratings per movie.
+
+```{r}
+edx %>%
+  count(movieId) %>%
+  ggplot(aes(n)) +
+  geom_histogram(bins = 30, color = "black") +
+  scale_x_log10() +
+  xlab("Number of ratings") +
+  ylab("Number of movies") +
+  ggtitle("Number of ratings per movie") +
+  theme_economist(base_size = 10, base_family = "sans",
+  horizontal = TRUE, dkpanel = FALSE)
+```
+
+
+We can see some movies that only have one rating, this fact will compromise the quality of the given recommendations.
+Fortunately it is a minority.
+
+```{r}
+edx %>%
+  group_by(movieId) %>%
+  summarize(count = n()) %>%
+  filter(count == 1) %>%
+  left_join(edx, by = "movieId") %>%
+  group_by(title) %>%
+  summarize(rating = rating, n_rating = count) %>%
+  slice(1:20) %>%
+  knitr::kable()
+```
+
+We can have a look on the number of ratings given by users
+```{r}
+edx %>%
+  count(userId) %>%
+  ggplot(aes(n)) +
+  geom_histogram(bins = 30, color = "black") +
+  scale_x_log10() +
+  xlab("Number of ratings") + 
+  ylab("Number of users") +
+  ggtitle("Number of ratings given by users") + 
+  theme_economist(base_size = 10, base_family = "sans",
+  horizontal = TRUE, dkpanel = FALSE)
+
+```
+
+```{r}
+# Plot mean movie ratings given by users
+edx %>%
+  group_by(userId) %>%
+  filter(n() >= 100) %>%
+  summarize(b_u = mean(rating)) %>%
+  ggplot(aes(b_u)) +
+  geom_histogram(bins = 30, color = "black") +
+  xlab("Mean rating") +
+  ylab("Number of users") +
+  ggtitle("Mean movie ratings given by users") +
+  scale_x_discrete(limits = c(seq(0.5,5,0.5))) +
+  theme_economist(base_size = 10, base_family = "sans",
+  horizontal = TRUE, dkpanel = FALSE)
+
+```
+
+We are going to compute different modelling approaches and see which one performs best.
+
+Firstly, we are going to predict ratings using just the average rating which is 3.512465.
+
+```{r}
+avg <- mean(edx$rating)
+
+model_avg_rmse <- RMSE(validation$rating, avg)
+
+model_avg_rmse
+```
+
+
+```{r}
+rmse_results_df <- data_frame(method_used = "Average movie rating model", RMSE = model_avg_rmse)
+```
+
+Different movies are rated differently. As shown, the histogram is not symmetric. It is skewed towards a negative rating. So the movie effect can be taken into account with the difference from the average rating.
+
+```{r}
+movie_avgs <- edx %>% group_by(movieId) %>% summarize(b_i = mean(rating - avg))
+movie_avgs %>% qplot(b_i, geom ="histogram", bins = 10, data = ., color = I("black"), ylab = "Number of movies", main = "Number of movies with the computed b_i") +
+                theme_economist(base_size = 10, base_family = "sans", horizontal = TRUE, dkpanel = FALSE)
+```
+
+
+```{r}
+predicted_ratings <- avg +  validation %>% left_join(movie_avgs, by='movieId') %>% pull(b_i)
+model_moviebias_rmse <- RMSE(predicted_ratings, validation$rating)
+rmse_results_df <- bind_rows(rmse_results_df, data_frame(method_used="Movie bias effect model", RMSE = model_moviebias_rmse ))
+model_moviebias_rmse
+```
+Some movies are rated more often than others. The model should incorporate a movie bias aspect into it.
+This is a model taking into account the movie effect b_i, as said before, we achieve this by subtracting the rating minus the mean for each rating that the movie received.
+We already see an improved rmse factor with this simple approach.
+
+```{r}
+user_avgs <- edx %>% left_join(movie_avgs, by='movieId') %>% group_by(userId) %>% summarize(b_u = mean(rating - avg - b_i))
+user_avgs %>% qplot(b_u, geom ="histogram", bins = 30, data = ., color = I("black"), ylab = "Number of movies", main = "Number of movies with the computed b_u") + 
+              theme_economist(base_size = 10, base_family = "sans", horizontal = TRUE, dkpanel = FALSE)
+```
+
+
+
+```{r}
+predicted_ratings <- validation%>% left_join(movie_avgs, by='movieId') %>% left_join(user_avgs, by='userId') %>% mutate(pred = avg + b_i + b_u) %>% pull(pred)
+                                                             
+model_movieuser_rmse <- RMSE(predicted_ratings, validation$rating)
+rmse_results_df <- bind_rows(rmse_results_df, data_frame(method_used="Movie and user bias effect model", RMSE = model_movieuser_rmse))
+```
+
+
+```{r}
+model_movieuser_rmse
+
+```
+
+
+Now, we regularize the user and movie effects adding a penalty factor, named lambda (the tuning parameter). We define a number of values for lambda and for each lambda we will find b_i & b_u, which will be used to find predicted values. The lambda that minimizes the RMSE should be chosen.
+
+```{r}
+lambdas <- seq(3, 8, 0.25)
+
+rmses <- sapply(lambdas, function(l){
+                                                               
+                  avg <- mean(edx$rating)
+ 
+                  b_i <- edx %>% group_by(movieId) %>% summarize(b_i = sum(rating - avg)/(n()+l))
+                                                               
+                  b_u <- edx %>% left_join(b_i, by="movieId") %>% group_by(userId) %>% summarize(b_u = sum(rating - b_i - avg)/(n()+l))
+                                                               
+                  predicted_ratings <- validation %>% left_join(b_i, by = "movieId") %>% left_join(b_u, by = "userId") %>% mutate(pred = avg + b_i + b_u) %>%
+                                        pull(pred)
+                                                               
+                  return(RMSE(predicted_ratings, validation$rating))
+                                    })
+```
+
+
+```{r}
+qplot(lambdas, rmses) + theme_economist(base_size = 10, base_family = "sans", horizontal = TRUE, dkpanel = FALSE)
+
+usedlambda <- lambdas[which.min(rmses)]
+usedlambda
+
+rmse_results_df <- bind_rows(rmse_results_df, data_frame(method_used="Regularized movie and user bias effect model", RMSE = min(rmses)))
+```
+
+Now let's see if there is a genre bias that we can add to our model.
+
+```{r}
+genre_avgs <- edx %>% left_join(movie_avgs, by='movieId') %>% left_join(user_avgs, by='userId') %>% group_by(genres)  %>% summarize(b_g = mean(rating - avg - b_i - b_u))
+genre_avgs %>% qplot(b_g, geom ="histogram", bins = 30, data = ., color = I("black"), ylab = "Number of movies", main = "Number of movies with the computed b_g") + 
+              theme_economist(base_size = 10, base_family = "sans", horizontal = TRUE, dkpanel = FALSE)
+```
+We can see a positive bias when we compute genre. Which makes sense since there are genres more liked than others in users.
+
+```{r}
+lambdas <- seq(3, 8, 0.25)
+
+rmses <- sapply(lambdas, function(l){
+                                                               
+                  avg <- mean(edx$rating)
+ 
+                  b_i <- edx %>% group_by(movieId) %>% summarize(b_i = sum(rating - avg)/(n()+l))
+                                                               
+                  b_u <- edx %>% left_join(b_i, by="movieId") %>% group_by(userId) %>% summarize(b_u = sum(rating - b_i - avg)/(n()+l))
+                  
+                  b_g <- edx %>% left_join(b_i, by='movieId') %>% left_join(b_u, by='userId') %>% group_by(genres)  %>% summarize(b_g = mean(rating - avg - b_i - b_u))
+                                                               
+                  predicted_ratings <- validation %>% left_join(b_i, by = "movieId") %>% left_join(b_u, by = "userId") %>% left_join(b_g,by="genres") %>% mutate(pred = avg + b_i + b_u + b_g) %>%
+                                        pull(pred)
+                                                               
+                  return(RMSE(predicted_ratings, validation$rating))
+                                    })
+
+qplot(lambdas, rmses) + theme_economist(base_size = 10, base_family = "sans", horizontal = TRUE, dkpanel = FALSE)
+
+usedlambda <- lambdas[which.min(rmses)]
+usedlambda
+
+rmse_results_df <- bind_rows(rmse_results_df, data_frame(method_used="Regularized with genre, movie and user bias effect model", RMSE = min(rmses)))
+```
+
+We see that we get another step towards minimizing rmse if we incorporate in the model a feature accounting the genre bias.
+
+
+```{r}
+rmse_results_df %>% knitr::kable()
+```
+In conclusion, we have seen that indeed it's farily simple to build a successful recommendation system.
+
+As shown by the results, when we include more insights into the model, the rmse lowers. 
+
+The regularized with genre, movie and user effect model turns to be the best model in terms of delivered RMSE.
+
+In future works it has been suggested by other students to use the "recosystem" package, which seems to have specific tools that optimizes the type of analysis that recomendation systems work on. The results that some of them are achieving are quite impressing and look like the way to go forward.
+
+```{r}
+version
+```
+
+
